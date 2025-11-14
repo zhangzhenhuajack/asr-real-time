@@ -1,0 +1,12 @@
+# AWS SDK and services
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Amazon Transcribe Streaming
+amazon-transcribe>=0.6.0
+
+# WebSocket support (if needed)
+websockets>=11.0
+
+# HTTP server and utilities (built-in modules, no requirements)
+# json, logging, asyncio, threading, queue, time, http.server, urllib.parse, datetime, concurrent.futures

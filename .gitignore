@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+frontend/build/
+.aws-sam/
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.development
+
+# Configuration files with sensitive data
+config.json
+config.local.json
+secrets.json
+
+# Temporary deployment files
+ecs-task-definition-updated.json
+ecs-service-updated.json
+
+# Audio files (generated during testing)
+*.pcm
+*.wav
+received_audio_*.pcm
+
+# Logs
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# AWS credentials and config
+.aws/
+aws-credentials.json
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Backup files
+*.bak
+*.backup
