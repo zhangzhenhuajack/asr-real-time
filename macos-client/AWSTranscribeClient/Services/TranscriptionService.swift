@@ -29,143 +29,128 @@ class TranscriptionService: ObservableObject {
         
         // Create credentials provider
         let credentials = AWSCredentials(
-            accessKeyId: accessKey,
-            secretAccessKey: secretKey
+            accessKey: accessKey,
+            secret: secretKey
         )
         
         let credentialsProvider = try StaticCredentialsProvider(credentials)
         
         // Create client configuration
         let config = try await TranscribeStreamingClient.TranscribeStreamingClientConfiguration(
-            awsCredentialIdentityResolver: credentialsProvider,
+            credentialsProvider: credentialsProvider,
             region: region
         )
         
         transcribeClient = TranscribeStreamingClient(config: config)
     }
     
-    func startTranscription(audioDataHandler: @escaping (Data) -> Void) async throws {
-        guard let client = transcribeClient else {
+    func startTranscription() async throws {
+        if transcribeClient == nil {
             try await initializeClient()
-            guard let client = transcribeClient else {
+            guard transcribeClient != nil else {
                 throw TranscriptionError.clientNotInitialized
             }
         }
+        
+        isTranscribing = true
+        appState.statusMessage = "Starting transcription..."
         
         // Create audio stream
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
         audioStream = stream
         audioContinuation = continuation
         
-        isTranscribing = true
-        
-        // Start transcription task
         transcriptionTask = Task {
-            await performTranscription(client: client, audioStream: stream, audioDataHandler: audioDataHandler)
+            do {
+                try await performTranscription()
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isTranscribing = false
+                    self.appState.statusMessage = "Error: \(error.localizedDescription)"
+                }
+            }
         }
     }
     
-    private func performTranscription(
-        client: TranscribeStreamingClient,
-        audioStream: AsyncStream<Data>,
-        audioDataHandler: @escaping (Data) -> Void
-    ) async {
-        do {
-            // Create audio stream for AWS
-            let awsAudioStream = AsyncStream<TranscribeStreamingClientTypes.AudioStream> { continuation in
+    private func performTranscription() async throws {
+        guard let client = transcribeClient,
+              let audioStream = audioStream else {
+            throw TranscriptionError.clientNotInitialized
+        }
+        
+        // Convert Data stream to AWS audio stream
+        let awsAudioStream = audioStream.map { data in
+            TranscribeStreamingClientTypes.AudioStream.audioevent(
+                TranscribeStreamingClientTypes.AudioEvent(audioChunk: data)
+            )
+        }
+        
+        // Configure transcription request
+        let request = StartStreamTranscriptionInput(
+            audioStream: AsyncThrowingStream { continuation in
                 Task {
-                    for await audioData in audioStream {
-                        let audioEvent = TranscribeStreamingClientTypes.AudioStream.audioevent(
-                            TranscribeStreamingClientTypes.AudioEvent(audioChunk: audioData)
-                        )
-                        continuation.yield(audioEvent)
+                    for await chunk in awsAudioStream {
+                        continuation.yield(chunk)
                     }
                     continuation.finish()
                 }
-            }
-            
-            // Configure transcription request
-            let request = StartStreamTranscriptionInput(
-                audioStream: awsAudioStream,
-                enableChannelIdentification: false,
-                languageCode: nil, // Auto-detect
-                identifyLanguage: true,
-                languageOptions: appState.selectedLanguages,
-                mediaSampleRateHertz: 16000,
-                mediaEncoding: .pcm,
-                numberOfChannels: 1,
-                preferredLanguage: .init(rawValue: appState.preferredLanguage)
-            )
-            
-            // Start streaming transcription
-            let response = try await client.startStreamTranscription(input: request)
-            
-            // Process transcription results
-            if let transcriptResultStream = response.transcriptResultStream {
-                for try await event in transcriptResultStream {
-                    await handleTranscriptEvent(event)
-                }
-            }
-            
-        } catch {
-            await MainActor.run {
-                self.errorMessage = "Transcription error: \(error.localizedDescription)"
-                self.appState.statusMessage = "Error: \(error.localizedDescription)"
-            }
+            },
+            enableChannelIdentification: false,
+            identifyLanguage: true,
+            languageCode: nil,
+            languageOptions: appState.selectedLanguages.joined(separator: ","),
+            mediaEncoding: .pcm,
+            mediaSampleRateHertz: 16000,
+            numberOfChannels: 1,
+            preferredLanguage: .init(rawValue: appState.preferredLanguage)
+        )
+        
+        // Start streaming transcription
+        let response = try await client.startStreamTranscription(input: request)
+        
+        await MainActor.run {
+            self.appState.statusMessage = "Listening..."
+        }
+        
+        // Process transcription results
+        guard let resultStream = response.transcriptResultStream else {
+            throw TranscriptionError.transcriptionFailed("No result stream")
+        }
+        
+        for try await event in resultStream {
+            await processTranscriptionEvent(event)
         }
     }
     
-    private func handleTranscriptEvent(_ event: TranscribeStreamingClientTypes.TranscriptResultStream) async {
+    private func processTranscriptionEvent(_ event: TranscribeStreamingClientTypes.TranscriptResultStream) async {
         switch event {
         case .transcriptevent(let transcriptEvent):
             guard let results = transcriptEvent.transcript?.results else { return }
             
             for result in results {
-                guard let alternatives = result.alternatives, !alternatives.isEmpty else { continue }
+                guard let alternatives = result.alternatives,
+                      let firstAlternative = alternatives.first,
+                      let transcript = firstAlternative.transcript else { continue }
                 
-                if let transcript = alternatives[0].transcript {
-                    await MainActor.run {
-                        if result.isPartial {
-                            // Partial result
-                            self.appState.partialTranscript = transcript
-                            self.appState.statusMessage = "Transcribing..."
-                        } else {
-                            // Final result
-                            self.appState.appendFinalTranscript(transcript)
-                            self.appState.partialTranscript = ""
-                            self.appState.statusMessage = "Listening..."
-                        }
+                await MainActor.run {
+                    if result.isPartial == true {
+                        // Partial result
+                        self.appState.partialTranscript = transcript
+                    } else {
+                        // Final result
+                        self.appState.appendFinalTranscript(transcript)
+                        self.appState.partialTranscript = ""
+                        self.appState.statusMessage = "Listening..."
                     }
                 }
             }
             
-        case .badrequestevent(let badRequest):
-            await MainActor.run {
-                self.errorMessage = "Bad request: \(badRequest.message ?? "Unknown error")"
-            }
-            
-        case .conflictexception(let conflict):
-            await MainActor.run {
-                self.errorMessage = "Conflict: \(conflict.message ?? "Unknown error")"
-            }
-            
-        case .internalfailureexception(let failure):
-            await MainActor.run {
-                self.errorMessage = "Internal failure: \(failure.message ?? "Unknown error")"
-            }
-            
-        case .limitexceededexception(let limit):
-            await MainActor.run {
-                self.errorMessage = "Limit exceeded: \(limit.message ?? "Unknown error")"
-            }
-            
-        case .serviceunavailableexception(let unavailable):
-            await MainActor.run {
-                self.errorMessage = "Service unavailable: \(unavailable.message ?? "Unknown error")"
-            }
-            
         default:
-            break
+            // Handle other cases or errors
+            await MainActor.run {
+                self.errorMessage = "Unknown transcription event"
+            }
         }
     }
     
@@ -189,16 +174,16 @@ class TranscriptionService: ObservableObject {
 enum TranscriptionError: LocalizedError {
     case credentialsNotFound
     case clientNotInitialized
-    case streamCreationFailed
+    case transcriptionFailed(String)
     
     var errorDescription: String? {
         switch self {
         case .credentialsNotFound:
             return "AWS credentials not found. Please configure them in Settings."
         case .clientNotInitialized:
-            return "Transcription client not initialized"
-        case .streamCreationFailed:
-            return "Failed to create audio stream"
+            return "Transcription client not initialized."
+        case .transcriptionFailed(let message):
+            return "Transcription failed: \(message)"
         }
     }
 }

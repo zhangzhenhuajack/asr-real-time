@@ -184,7 +184,7 @@ struct ContentView: View {
                 try await transcriptionService.initializeClient()
                 
                 // Start transcription
-                try await transcriptionService.startTranscription { _ in }
+                try await transcriptionService.startTranscription()
                 
                 // Start audio capture
                 try audioCaptureService.startCapture()
